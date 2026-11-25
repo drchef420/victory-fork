@@ -60,6 +60,19 @@ try {
     $gpu = (Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name) -join ', '
     $ram = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB)
     Note "PC: $gpu, $ram GB memory"
+    # A 16 GB PC pages the title's world to disk (31,000 pages a second read
+    # back in a 2026-11-25 run): one frame takes 20-45 s and the title's own
+    # hang check ends it. A paging file Windows grows on demand stalls too.
+    $os = Get-CimInstance Win32_OperatingSystem
+    $pf = @(Get-CimInstance Win32_PageFileSetting)
+    $fixed = $pf.Count -gt 0 -and ($pf | Where-Object { $_.InitialSize -gt 0 -and $_.InitialSize -eq $_.MaximumSize }).Count -gt 0
+    Note ("commit limit {0:N0} GB; paging file {1}" -f ($os.TotalVirtualMemorySize / 1MB), $(if ($fixed) { "fixed $($pf[0].InitialSize) MB" } else { 'managed by Windows' }))
+    if ($ram -lt 30) {
+        Say "Note: this PC has $ram GB of memory. The game's world needs about 32 GB here: expect freezes and a crash a few minutes in."
+    }
+    if (-not $fixed) {
+        Say 'Note: the paging file is managed by Windows. Set a fixed size (Initial = Maximum = 32768 MB) under System Properties > Advanced > Performance > Virtual memory, then restart.'
+    }
 } catch { }
 
 # --- Build -----------------------------------------------------------------
