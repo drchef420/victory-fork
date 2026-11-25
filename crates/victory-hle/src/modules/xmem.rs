@@ -957,9 +957,10 @@ pub extern "system" fn XMemGetWorkingSetStatistics(_which: u32, out: *mut Workin
     // SAFETY: our own process and a sized structure.
     unsafe { K32GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb) };
     let (gpu_optimal, standard) = victory_gpu::console::current().title_memory();
+    let own = own_report();
     let stats = WorkingSet {
         title_limit: gpu_optimal + standard - TRANSFERRED.load(Ordering::Relaxed),
-        title_used: counters.PagefileUsage,
+        title_used: own.map_or(counters.PagefileUsage, |own| own as usize),
         gpu_optimal_limit: gpu_optimal,
         ..Default::default()
     };
@@ -974,17 +975,83 @@ pub extern "system" fn XMemGetWorkingSetStatistics(_which: u32, out: *mut Workin
     static ASKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let asked = ASKED.fetch_add(1, Ordering::Relaxed);
     if asked.is_multiple_of(1024) {
+        // What the title's own memory is, beside what it is told: at the first asking only
+        // while it is told the process's commit (each count walks the address space).
+        let own_mb = own.or_else(|| (asked == 0).then(title_own_memory)).map(|b| b >> 20);
         tracing::info!(
             asked = asked + 1,
             which = _which,
             limit_mb = stats.title_limit >> 20,
             used_mb = stats.title_used >> 20,
+            own_mb,
+            told = if own.is_some() { "its own memory" } else { "the process's commit" },
             "the title asks how much memory it uses"
         );
     }
     // SAFETY: checked non-null; the title passes room for the structure.
     unsafe { out.write(stats) };
     1
+}
+
+/// What the title's own memory is: what it committed at console addresses
+/// (its heaps and other reservations below 2^40, where the layer allocates
+/// nothing; views of its physical pages and program images left out), and
+/// the physical pages it holds, mapped or not, each counted once however
+/// many views show it. The layer's own memory, the card's driver and its
+/// files lie above 2^40 (`copystat`'s memory map).
+/// shortcut: blocks of [`XMemAllocDefault`] (the host heap, above 2^40) are
+/// not counted; the title has its own allocator hooks.
+fn title_own_memory() -> u64 {
+    use windows_sys::Win32::System::Memory::{MEM_PRIVATE, VirtualQuery};
+    let mut committed = 0u64;
+    let mut at = 1usize << 16;
+    while at < 1 << 40 {
+        let mut info = MEMORY_BASIC_INFORMATION::default();
+        // SAFETY: a query of our own address space into a sized structure.
+        let n = unsafe { VirtualQuery(at as *const c_void, &mut info, size_of_val(&info)) };
+        if n == 0 || info.RegionSize == 0 {
+            break;
+        }
+        if info.State == MEM_COMMIT && info.Type == MEM_PRIVATE {
+            committed += info.RegionSize as u64;
+        }
+        at = (info.BaseAddress as usize).saturating_add(info.RegionSize);
+    }
+    committed + (physical().pages.len() * PAGE) as u64
+}
+
+/// `VICTORY_TITLE_USED=own`: [`XMemGetWorkingSetStatistics`] tells the
+/// title its own memory ([`title_own_memory`], counted again every two
+/// seconds on a thread of its own) instead of all the process has
+/// committed, which with the layer and the card's driver is twice the
+/// title's limit (27 GB against 13.5 GB in run 60). Off by default until a
+/// run shows the title asking and what it does with a figure under its
+/// limit; the log line of the asking gives both figures either way.
+fn own_report() -> Option<u64> {
+    use std::sync::atomic::AtomicU64;
+    static ON: LazyLock<bool> =
+        LazyLock::new(|| std::env::var_os("VICTORY_TITLE_USED").is_some_and(|v| v == "own"));
+    static OWN: AtomicU64 = AtomicU64::new(0);
+    static COUNTING: std::sync::Once = std::sync::Once::new();
+    if !*ON {
+        return None;
+    }
+    COUNTING.call_once(|| {
+        // The first answer is counted now: the title is never told the process's commit.
+        OWN.store(title_own_memory(), Ordering::Relaxed);
+        let spawned = std::thread::Builder::new()
+            .name("victory title memory".into())
+            .spawn(|| {
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(2));
+                    OWN.store(title_own_memory(), Ordering::Relaxed);
+                }
+            });
+        if let Err(error) = spawned {
+            tracing::warn!(%error, "the title's own memory is not counted again: no thread");
+        }
+    });
+    Some(OWN.load(Ordering::Relaxed))
 }
 
 /// Hands title memory (standard, in 2 MiB pages) to the system. The other
@@ -1104,6 +1171,28 @@ mod tests {
         );
         assert!(!p.is_null() && (p as usize) >= 1 << 32, "{p:p}");
         assert!((p as usize) + (16 << 30) <= 1 << 40, "{p:p}");
+        // SAFETY: our own reservation.
+        assert_ne!(unsafe { VirtualFree(p, 0, MEM_RELEASE) }, 0);
+    }
+
+    /// What the title commits below 2^40 and the physical pages it holds
+    /// count as its own memory; the layer's allocations above do not.
+    #[test]
+    fn the_titles_own_memory_is_what_it_committed_and_its_pages() {
+        // (other tests allocate meanwhile: only lower bounds are certain)
+        let before = title_own_memory();
+        let size = 256 * MIB;
+        let p = XMemVirtualAlloc(std::ptr::null_mut(), size, MEM_RESERVE | MEM_COMMIT, GRAPHICS, PAGE_READWRITE);
+        assert!(!p.is_null() && (p as usize) < 1 << 40, "{p:p}");
+        let (mut count, mut pages) = (16usize, [0usize; 16]);
+        assert_eq!(XMemAllocatePhysicalPages(0, &mut count, pages.as_mut_ptr()), 1);
+        let with = title_own_memory();
+        assert!(with >= before + (size + 16 * PAGE) as u64, "{before} then {with}");
+        // A host allocation is not the title's.
+        let host = vec![1u8; 512 * MIB];
+        assert!(title_own_memory() < with + 512 * MIB as u64);
+        drop(host);
+        assert_eq!(XMemFreePhysicalPages(16, pages.as_ptr()), 1);
         // SAFETY: our own reservation.
         assert_ne!(unsafe { VirtualFree(p, 0, MEM_RELEASE) }, 0);
     }
