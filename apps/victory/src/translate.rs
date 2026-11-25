@@ -74,10 +74,33 @@ struct Tally {
     /// With `--list`: one line per program and outcome.
     list: bool,
     lines: Vec<String>,
+    /// The first reason the program being translated stopped at, if any.
+    stopped: Option<String>,
+    /// The wave size the program being translated was emitted for, if any.
+    emitted_wave: Option<Option<u32>>,
+    /// The ray-tracing structure builder's programs (spilled user-data
+    /// table, as `victory-gpu` tells them): label and outcome.
+    builder: Vec<(String, Builder)>,
+}
+
+/// What became of one of the structure builder's programs. The builder runs
+/// all or none in a real run (`victory-gpu`'s `Builder`), so any program
+/// that is not [`Builder::Ready`] keeps the title's ray-traced light off.
+#[derive(Debug)]
+enum Builder {
+    /// Emitted, and the host may run it at its own wave size.
+    Ready,
+    /// Emitted, but only for waves of this many lanes.
+    Wave(u32),
+    /// Stopped at this reason.
+    Stopped(String),
 }
 
 impl Tally {
     fn fail(&mut self, reason: String, example: impl FnOnce() -> String) {
+        if self.stopped.is_none() {
+            self.stopped = Some(reason.clone());
+        }
         if self.list {
             let e = example();
             self.lines.push(format!("{e}  {reason}"));
@@ -134,6 +157,7 @@ impl Tally {
             *self.exports.entry(k).or_default() += n;
         }
         self.lines.extend(other.lines);
+        self.builder.extend(other.builder);
         for (reason, (n, example)) in other.failed {
             self.failed.entry(reason).or_insert((0, example)).0 += n;
         }
@@ -374,6 +398,7 @@ pub fn run(
             println!("pair {v} + {p}: {made}");
         }
     }
+    builder_report(t.builder);
     let mut lines = t.lines;
     lines.sort();
     for l in lines {
@@ -477,6 +502,8 @@ fn translate(
 fn translate_programs(container: &Container, programs: Vec<NativeProgram>, example: &dyn Fn() -> String, t: &mut Tally, checks: &mut Checks) {
     for p in programs {
         t.programs += 1;
+        t.stopped = None;
+        t.emitted_wave = None;
         match victory_shader::spill::build(&p) {
             Ok(program) => {
                 t.translated += 1;
@@ -540,6 +567,7 @@ fn translate_programs(container: &Container, programs: Vec<NativeProgram>, examp
                     *counter(t, p.stage, 0) += 1;
                     match emit::emit(container, &p, &program, &s, &i, &r) {
                         Ok(shader) => {
+                            t.emitted_wave = Some(emit::required_wave_size(&shader.dxil));
                             census_line(&label(), &p, &program, &shader);
                             *counter(t, p.stage, 1) += 1;
                             check(shader, t, checks, label);
@@ -560,6 +588,43 @@ fn translate_programs(container: &Container, programs: Vec<NativeProgram>, examp
                 t.fail(reason, || format!("{} {:?}", example(), p.stage));
             }
         }
+        if victory_shader::spill::is_spilled(&p) {
+            let outcome = match (t.stopped.take(), t.emitted_wave.take()) {
+                (Some(reason), _) => Builder::Stopped(reason),
+                (None, Some(Some(n))) => Builder::Wave(n),
+                (None, Some(None)) => Builder::Ready,
+                (None, None) => Builder::Stopped("not emitted".into()),
+            };
+            t.builder.push((format!("{} {:?}", example(), p.stage), outcome));
+        }
+    }
+}
+
+/// The structure builder's programs and what became of each. They run all
+/// or none in a real run, so this is the list of what keeps the title's
+/// ray-traced light and shadows off on this host. Translate as the run's
+/// card would: `VICTORY_HOST_WAVE=32` for a GPU of 32-lane waves (NVIDIA,
+/// Intel), and `--pipelines` to have the host's driver make each one.
+fn builder_report(mut programs: Vec<(String, Builder)>) {
+    if programs.is_empty() {
+        return;
+    }
+    programs.sort_by(|a, b| a.0.cmp(&b.0));
+    let ready = programs.iter().filter(|(_, o)| matches!(o, Builder::Ready)).count();
+    let wave = programs.iter().filter(|(_, o)| matches!(o, Builder::Wave(_))).count();
+    let stopped = programs.len() - ready - wave;
+    println!(
+        "builder      {} ray-tracing structure builder programs: {ready} at any wave size, \
+         {wave} only at a fixed wave size, {stopped} stopped (the builder runs all or none)",
+        programs.len()
+    );
+    for (label, outcome) in &programs {
+        let what = match outcome {
+            Builder::Ready => "ready".to_owned(),
+            Builder::Wave(n) => format!("needs {n}-lane waves"),
+            Builder::Stopped(reason) => format!("stopped: {reason}"),
+        };
+        println!("  builder {label}  {what}");
     }
 }
 

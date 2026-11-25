@@ -118,6 +118,16 @@ pub use shader::{
     set_view_heap_limit, view_heap_limit,
 };
 
+/// The wave size an emitted shader (a [`HostShader`]'s `dxil`, a whole
+/// container) requires of the host, from its `PSV0` part: `Some(64)` for a
+/// program that still needs 64-lane waves, which a GPU of 32-lane waves
+/// (NVIDIA, Intel) refuses to make a pipeline of. `None` where the host may
+/// choose, or the container has no such part.
+pub fn required_wave_size(dxil: &[u8]) -> Option<u32> {
+    let c = Container::parse(dxil).ok()?;
+    container::psv_wave_size(c.part(FourCC::PSV0)?.data)
+}
+
 /// The loop limit without an override: 2^20.
 pub const DEFAULT_LOOP_LIMIT: u32 = lower::LOOP_LIMIT;
 

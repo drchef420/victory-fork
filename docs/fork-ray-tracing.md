@@ -66,6 +66,16 @@ shaders and emulates the one instruction.
 - With `VICTORY_BVH_BUILDER=1` the builder still stays off in a real run: a few
   of its pipelines are refused by the host (they still ask for 64-lane waves on
   a 32-lane GPU) or do not translate.
+  To see which ones, offline and without the GPU running the title:
+
+  ```powershell
+  $env:VICTORY_HOST_WAVE = "32"     # as on a GPU of 32-lane waves (NVIDIA, Intel)
+  target\release\victory.exe translate <game dir> --pipelines
+  ```
+
+  The `builder` lines at the end list every builder program with `ready`,
+  `needs 64-lane waves` or the reason it stopped. Leave out `VICTORY_HOST_WAVE`
+  on an AMD card, which runs 64-lane waves.
 - Five shadow-mask trace programs do not translate yet.
 - An access to a title page that has no host copy is lost (a read gives zero, a
   store is dropped).
