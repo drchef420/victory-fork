@@ -306,6 +306,19 @@ fn find(hay: &[u8], needle: &[u8]) -> Option<usize> {
     hay.windows(needle.len()).position(|w| w == needle)
 }
 
+/// The wave size a `PSV0` part requires (runtime info's minimum and maximum
+/// wave lane counts, as [`psv`] writes them), or `None` where it leaves the
+/// wave size to the host (0 and `u32::MAX`) or is too short to say.
+pub(crate) fn psv_wave_size(part: &[u8]) -> Option<u32> {
+    let u32_at = |at: usize| part.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().expect("4 bytes")));
+    // the runtime info's size, then the info (lane counts at 16 and 20)
+    if u32_at(0)? < 24 {
+        return None;
+    }
+    let (min, max) = (u32_at(4 + 16)?, u32_at(4 + 20)?);
+    (min == max && min != 0).then_some(min)
+}
+
 /// The container: parts in order, hashed.
 pub(crate) fn build(parts: &[(&[u8; 4], &[u8])]) -> Vec<u8> {
     let table = 0x20 + 4 * parts.len();
@@ -415,5 +428,28 @@ mod tests {
             .map(|b| format!("{b:02x}"))
             .collect();
         assert_eq!(hex, "900150983cd24fb0d6963f7d28e17f72");
+    }
+
+    /// What [`psv`] writes as a compute program's wave size is what
+    /// [`psv_wave_size`] reads back; no wave size reads as none.
+    #[test]
+    fn the_wave_size_psv_writes_is_read_back() {
+        for wave_size in [None, Some(32), Some(64)] {
+            let part = psv(&Psv {
+                stage: 5,
+                flag: false,
+                inputs: &[],
+                outputs: &[],
+                prims: &[],
+                mesh: None,
+                geometry: None,
+                bindings: &[],
+                threads: [64, 1, 1],
+                wave_size,
+            });
+            assert_eq!(psv_wave_size(&part), wave_size);
+        }
+        assert_eq!(psv_wave_size(&[]), None);
+        assert_eq!(psv_wave_size(&16u32.to_le_bytes()), None);
     }
 }

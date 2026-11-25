@@ -66,12 +66,43 @@ shaders and emulates the one instruction.
 - With `VICTORY_BVH_BUILDER=1` the builder still stays off in a real run: a few
   of its pipelines are refused by the host (they still ask for 64-lane waves on
   a 32-lane GPU) or do not translate.
+  To see which ones, offline and without the GPU running the title:
+
+  ```powershell
+  $env:VICTORY_HOST_WAVE = "32"     # as on a GPU of 32-lane waves (NVIDIA, Intel)
+  target\release\victory.exe translate <game dir> --pipelines
+  ```
+
+  The `builder` lines at the end list every builder program with `ready`,
+  `needs 64-lane waves` or the reason it stopped. Leave out `VICTORY_HOST_WAVE`
+  on an AMD card, which runs 64-lane waves.
 - Five shadow-mask trace programs do not translate yet.
 - An access to a title page that has no host copy is lost (a read gives zero, a
   store is dropped).
 - Not publicly documented, and assumed: the instruction's rounding, the order
   of two boxes entered at the same distance, and the result for a ray exactly
   through an edge.
+- Checked against AMD's own software version of the instruction (GPURT,
+  MIT, `src/shaders/IntersectCommon.hlsl`: `fast_intersect_bbox`,
+  `IntersectNodeBvh4`, `fast_intersect_triangle`) on 2 million random rays
+  each, half of them on a coarse grid so that touching faces, zero direction
+  components and ties are common:
+  - Triangles: hit or miss the same on every ray, the same sign of the
+    denominator (which way the triangle faces), and the same distance.
+  - Boxes: the same children hit on 99.5 % of rays. The rest are rays lying
+    exactly in the plane of a box's face (a direction component of 0, origin
+    on the face): ours, like the Vulkan driver's emulation, misses along a
+    box's far face and hits along its near face; AMD's hits along both. A
+    ray in a face's plane meets the triangles there edge-on, so this should
+    change almost nothing.
+  - Order: 0.3 % of rays get the same children in another order. AMD sorts
+    on the entry distance clamped at 0 with a differently wired network
+    (pairs 0-2, 1-3, 0-1, 2-3, 1-2). Order changes which child a trace visits
+    first, so only the traversal's speed and any-hit order, not the closest
+    hit.
+  - AMD also grows each box by 6 ulps (`BOX_EXPANSION_DEFAULT_AMOUNT`) and
+    counts an entry exactly at the ray's extent as a hit; neither changed a
+    result in these rays.
 - Cost on the GPU is unmeasured.
 
 ## Where to look
