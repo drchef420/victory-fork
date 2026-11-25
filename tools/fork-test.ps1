@@ -52,6 +52,7 @@ $results = Join-Path $HOME ('victory-results\' + (Get-Date -Format 'yyyy-MM-dd_H
 New-Item -ItemType Directory -Force -Path $results | Out-Null
 $summary = Join-Path $results 'summary.txt'
 function Note($text) { Add-Content -LiteralPath $summary -Value $text }
+$started = Get-Date
 Note "fork test run, $(Get-Date)"
 Note "branch: $(git branch --show-current)  commit: $(git rev-parse --short HEAD)"
 Note "game program: $(Split-Path -Leaf $exe)"
@@ -123,11 +124,21 @@ if ($asks) {
     Note 'run2 skipped: the game never asked how much memory it uses.'
 }
 
-if (Test-Path 'crashes.log') {
-    Note ''
-    Note '=== crashes.log (last 40 lines) ==='
-    Get-Content 'crashes.log' -Tail 40 | ForEach-Object { Note $_ }
+# crashes.log is written beside the title's temp folder, under the data
+# folder `victory config` prints (data_dir\<title id>\crashes.log).
+$dataDir = (& $victory config 2>$null | Select-String '^data_dir\s*:\s*(.+)$' |
+    ForEach-Object { $_.Matches[0].Groups[1].Value.Trim() } | Select-Object -First 1)
+$crashLogs = @()
+if ($dataDir -and (Test-Path -LiteralPath $dataDir)) {
+    $crashLogs = @(Get-ChildItem -LiteralPath $dataDir -Recurse -Filter crashes.log -File -ErrorAction SilentlyContinue |
+        Where-Object { $_.LastWriteTime -ge $started })
 }
+foreach ($c in $crashLogs) {
+    Note ''
+    Note "=== $($c.FullName) (last 40 lines) ==="
+    Get-Content -LiteralPath $c.FullName -Tail 40 | ForEach-Object { Note $_ }
+}
+if ($crashLogs.Count -eq 0) { Note ''; Note "no crashes.log written during this test (looked under $dataDir)" }
 
 Say "Done. Send summary.txt from the folder that opens now (drag it into the chat, or paste its text)."
 Write-Host $summary
