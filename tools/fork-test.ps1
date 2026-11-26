@@ -121,7 +121,7 @@ function Play($name, $extra) {
     Note 'frame rate from the window title (every 5 s, last 12 samples):'
     $titles | Select-Object -Last 12 | ForEach-Object { Note "  $_" }
     Note 'memory question and warnings from the log:'
-    $lines = @(Select-String -LiteralPath $log -Pattern 'the title asks how much memory|ray-tracing structure builder|WARN|ERROR|panicked' |
+    $lines = @(Select-String -LiteralPath $log -Pattern 'device ready on|the title asks how much memory|ray-tracing structure builder|WARN|ERROR|panicked' |
         ForEach-Object { $_.Line } | Select-Object -First 60)
     if ($lines.Count -eq 0) { Note '  (none)' } else { $lines | ForEach-Object { Note "  $_" } }
     return $log

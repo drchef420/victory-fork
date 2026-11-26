@@ -54,9 +54,12 @@ use crate::descriptor::host::HostHeap;
 use crate::host::{HostList, host};
 use crate::shadow::Shadow;
 
-/// Copies that can be numbered (the run of heap slots is one longer). A
-/// listed frame of the opening cutscene names about 50 windows.
-const COPIES: u32 = 1023;
+/// Copies that can be numbered (the run of heap slots is one longer, taken
+/// from the dynamic part of each view heap: 262,144 slots). A listed frame
+/// of the opening cutscene names about 50 windows; the structure builder
+/// named more than 1,023 in its first frame (a test run of 2026-11-25), so
+/// the limit is 8,191 and the count is logged as it grows.
+const COPIES: u32 = 8191;
 /// A window of memory outside buffers (`shadow.rs`).
 const CELL: u64 = 4 << 20;
 /// A directory page.
@@ -157,6 +160,14 @@ impl Memory {
             None if self.copies.len() < COPIES as usize => {
                 self.copies.push(shadow.clone());
                 let n = self.copies.len() - 1;
+                let count = self.copies.len();
+                if count >= 64 && count.is_power_of_two() {
+                    tracing::info!(
+                        copies = count,
+                        limit = COPIES,
+                        "title memory by address: copies numbered so far"
+                    );
+                }
                 // Every page the copy holds whole, not only the one asked
                 // for: a structure is more than 64 KiB.
                 // shortcut: a page of a title buffer inside this one that

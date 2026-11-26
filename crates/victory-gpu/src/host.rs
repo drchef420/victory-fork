@@ -697,7 +697,22 @@ fn create() -> windows::core::Result<Host> {
         let adapter = CreateDXGIFactory2::<IDXGIFactory4>(DXGI_CREATE_FACTORY_FLAGS(0))
             .and_then(|factory| factory.EnumAdapterByLuid::<IDXGIAdapter3>(device.GetAdapterLuid()))
             .ok();
-        tracing::info!("host D3D12 device ready");
+        // Name the card: on a PC with two, Windows' default (the one with the
+        // main display, unless a per-app graphics preference says otherwise)
+        // is not always the one meant for the test.
+        let card = adapter
+            .as_ref()
+            .and_then(|a| a.GetDesc1().ok())
+            .map(|d| {
+                let len = d.Description.iter().position(|&c| c == 0).unwrap_or(d.Description.len());
+                format!(
+                    "{} ({} MB)",
+                    String::from_utf16_lossy(&d.Description[..len]),
+                    d.DedicatedVideoMemory / (1024 * 1024)
+                )
+            })
+            .unwrap_or_else(|| "unknown card".to_owned());
+        tracing::info!("host D3D12 device ready on {card}");
         Ok(Host {
             device,
             queue,
@@ -2774,7 +2789,55 @@ mod fill_ahead {
     }
 }
 
-pub(crate) use fill_ahead::wrote as shaders_write;
+/// Every copy back of what shaders wrote passes here just before the bytes
+/// go into title memory at `at`.
+pub(crate) fn shaders_write(at: usize, new: &[u8]) {
+    bounds_watch(at, new);
+    fill_ahead::wrote(at, new);
+}
+
+/// `VICTORY_BOUNDS_WATCH=1`: looks for empty bounds, two floats of
+/// infinity in one 8-byte word (+inf +inf, -inf -inf, or one of each), in
+/// what is about to be copied back into title memory, and logs where (the
+/// first 64 times, then every 1,024th). Builder runs of 2026-11-25 crashed
+/// the title's threads on such words used as pointers; this tells whether
+/// they came from the GPU, and at which title addresses.
+fn bounds_watch(at: usize, new: &[u8]) {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var_os("VICTORY_BOUNDS_WATCH").is_some_and(|v| v == "1")) {
+        return;
+    }
+    const INF: u64 = 0x7f80_0000;
+    const NEG: u64 = 0xff80_0000;
+    const EMPTY: [u64; 4] = [INF | INF << 32, NEG | NEG << 32, INF | NEG << 32, NEG | INF << 32];
+    // Words aligned in title memory.
+    let skip = (8 - at % 8) % 8;
+    let Some(body) = new.get(skip..) else { return };
+    let (mut count, mut first) = (0usize, None);
+    for (i, w) in body.chunks_exact(8).enumerate() {
+        let w = u64::from_le_bytes(w.try_into().unwrap_or_default());
+        if EMPTY.contains(&w) {
+            count += 1;
+            first.get_or_insert((at + skip + i * 8, w));
+        }
+    }
+    let Some((where_, word)) = first else { return };
+    static SAID: AtomicU64 = AtomicU64::new(0);
+    let n = SAID.fetch_add(1, Relaxed);
+    if n < 64 || n % 1024 == 0 {
+        tracing::warn!(
+            frame = crate::frame::current(),
+            start = format_args!("{at:#x}"),
+            bytes = new.len(),
+            words = count,
+            first = format_args!("{where_:#x}"),
+            word = format_args!("{word:#018x}"),
+            times = n + 1,
+            "copy back into title memory carries empty bounds (two floats of infinity in one word)"
+        );
+    }
+}
 
 /// Diagnostics: the fills of upload memory that made a submission wait for
 /// flights (`blocked_by`), which one they are, and whether the wait was
